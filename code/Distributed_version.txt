@@ -1,0 +1,651 @@
+#include <iostream>
+#include <vector>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
+#include <numeric>
+#include <fstream>
+using namespace std;
+
+//Total completed products
+int total_completed_products=0;
+
+//part work time
+int part_time[] = { 50, 50, 60, 60, 70 };
+
+//moving time
+int move_time[] = { 20, 20, 30, 30, 40 };
+
+//product work assemble time
+int pick_time[] = { 60, 60, 70, 70, 80 };
+
+//Maximum capacity
+int  capacity[] = { 5,5,4,3,3};
+
+//Buffer
+vector<int> buffer = { 0,0,0,0,0 };
+
+//Time count
+std::chrono::time_point<chrono::high_resolution_clock> start;
+
+//Part work waiting time
+const int MaxTimePart=1600000;
+
+//Product work waiting time
+const int MaxTimeProduct=2000000;
+
+//Lock
+mutex m1;
+
+//Condition variable, cv1 to wake up product work; cv2 to wake up product work
+condition_variable cv1, cv2;
+
+//Calculate the order time cost based on different type of job
+int time_cost(vector<int>& order, int type){
+    int res=0;
+    
+    //part worker time
+    if (type==0){
+        for (int i=0;i<5;i++){
+            res+=order[i]*part_time[i];
+        }
+    }
+    //product worker time
+    else if(type==1){
+        for (int i=0;i<5;i++){
+            res+=order[i]*pick_time[i];
+        }
+    }
+    //move back time
+    else{
+        for (int i=0;i<5;i++){
+            res+=order[i]*move_time[i];
+        }
+    }
+    return res;
+}
+
+// Print out the vertor
+ostream& operator<<(ostream& str, const vector<int>& L) {
+    str<<"< ";
+    for (auto i : L) { str << i << " "; }
+    str<<">";
+
+    return str;
+}
+
+//vector subtraction
+vector<int> operator-(const vector<int>& v1,const vector<int>& v2){
+    vector<int>v3;
+    for (int i=0;i<v1.size();i++){
+        v3.push_back(v1[i]-v2[i]);
+    }
+    return v3;
+}
+
+//vector addition
+vector<int> operator+(const vector<int>& v1,const vector<int>& v2){
+    vector<int>v3;
+    for (int i=0;i<v1.size();i++){
+        v3.push_back(v1[i]+v2[i]);
+    }
+    return v3;
+}
+
+//Generate a new laod order. Also, is there any partial order left
+vector<int> make_part_order(vector<int> & remain) {
+    vector<int> res;
+    if (accumulate(remain.begin(), remain.end(), 0)==0){
+        res={0,0,0,0,0};
+    }
+    else{
+         res={remain};
+    }
+    for (int i=0;i<5-accumulate(remain.begin(), remain.end(),0);i++){
+        res[(rand() % 5)]++;
+    }
+
+    return res;
+}
+
+//Generate a new pick order. Also, is there any partial order left
+vector<int> make_pick_order(vector<int> & remain) {
+    vector<int> res;
+    if (accumulate(remain.begin(), remain.end(), 0)==0){
+         res={0,0,0,0,0};
+        int length= rand() % 2 + 2;
+        vector<int> index;
+        for (int i=0;i<length;i++){
+            int o=(rand() % 5);
+            while (std::count(index.begin(), index.end(), o)) {
+                o=(rand() % 5);
+            }
+            index.push_back(o);
+        }
+        vector<int> tmp;
+        int num;
+        for (int i=0;i<5;i++){
+            num=index[(rand() % index.size())];
+            while(std::count(index.begin(), index.end(), num)>=4){
+                num=index[(rand() % index.size())];
+            }
+            tmp.push_back(index[(rand() % index.size())]);
+            res[tmp.back()]+=1;
+        }
+    }
+    else{
+         res={remain};
+        int count=0;
+        for (auto i: res) count+= (i>0) ? 1:0;
+        int length= (count==3)? 3:(rand() % (3-2+1))+2;
+        vector<int> index;
+        for (int i=0;i<5;i++){
+            if (res[i]) index.push_back(i);
+        }
+        for (int i=0;i<length-index.size();i++){
+            int o=(rand() % 5);
+            while (std::count(index.begin(), index.end(), o)) {
+                o=(rand() % 5);
+            }
+            index.push_back(o);
+        }
+        
+        int num;
+        for (int i=0;i<5-accumulate(remain.begin(),remain.end(),0);i++){
+            num=index[(rand() % index.size())];
+            while(res[num]+1==5){
+                num=index[(rand() % index.size())];
+            }
+            res[num]+=1;
+        }
+        
+    }
+    
+   
+    return res;
+}
+
+//Check if the local state is ready to assemble. Return 5 or 0.
+int assemble(vector<int>& order){
+    if(accumulate(order.begin(), order.end(), 0)==5)return 5;
+    return 0;
+}
+
+
+//struct check_buffer_for_part
+//{
+//public:
+//    check_buffer_for_part(vector<int>& o) : o1_part(o) {}
+//    vector<int> o1_part;
+//   bool operator () ()
+//   {
+//       vector<int> res;
+//       for (int i = 0; i < 5; i++) {
+//           if (o1_part[i]==0) res.push_back(0);
+//           else {
+//               if(buffer[i]>=capacity[i]) res.push_back(0);
+//               else {
+//                   res.push_back(min(capacity[i]-buffer[i],o1_part[i]));
+//               }
+//           }
+//       }
+//       return accumulate(res.begin(), res.end(), 0)>0;
+//   }
+//
+//};
+//
+//struct check_buffer_for_pick
+//{
+//public:
+//    check_buffer_for_pick(vector<int>& o) : o1_pick(o) {}
+//    vector<int> o1_pick;
+//   bool operator () ()
+//   {
+//           vector<int> res;
+//           for (int i = 0; i < 5; i++) {
+//               if (o1_pick[i] == 0) res.push_back(0);
+//               else {
+//                   if (buffer[i]==0) res.push_back(0);
+//                   else {
+//                       res.push_back(min(buffer[i], o1_pick[i]));
+//                   }
+//               }
+//           }
+//           return accumulate(res.begin(), res.end(), 0)>0;
+//   }
+//
+//};
+
+//check if the current load order is avaiable to process
+bool  check_buffer_for_part(vector<int>& o1_part ) {
+    vector<int> res;
+    for (int i = 0; i < 5; i++) {
+        if (o1_part[i]==0) res.push_back(0);
+        else {
+            if(buffer[i]>=capacity[i]) res.push_back(0);
+            else {
+                res.push_back(min(capacity[i]-buffer[i],o1_part[i]));
+            }
+        }
+    }
+    return accumulate(res.begin(), res.end(), 0)>0;
+}
+
+//check if the current pick up order is avaiable to process
+bool  check_buffer_for_pick(vector<int>& o1_pick) {
+    vector<int> res;
+    for (int i = 0; i < 5; i++) {
+        if (o1_pick[i] == 0) res.push_back(0);
+        else {
+            if (buffer[i]==0) res.push_back(0);
+            else {
+                res.push_back(min(buffer[i], o1_pick[i]));
+            }
+        }
+    }
+    return accumulate(res.begin(), res.end(), 0)>0;
+}
+
+//Return the actual processable load order based on buffer
+vector<int> retun_actual_order_for_part(vector<int>& order) {
+        vector<int> res;
+    for (int i = 0; i < 5; i++) {
+        if (order[i]==0) res.push_back(0);
+        else {
+            if(buffer[i]>=capacity[i]) res.push_back(0);
+            else {
+                res.push_back(min(capacity[i]-buffer[i],order[i]));
+            }
+        }
+    }
+    return res;
+}
+
+//Return the actual processable pickup order based on buffer
+vector<int> retun_actual_order_for_pick(vector<int>& order) {
+    vector<int> res;
+    for (int i = 0; i < 5; i++) {
+        if (order[i] == 0) res.push_back(0);
+        else {
+            if (buffer[i] ==0) res.push_back(0);
+            else {
+                res.push_back(min(buffer[i], order[i]));
+            }
+        }
+    }
+    return res;
+}
+
+//update buffer from a load order
+void part_update(vector<int>& order){
+    for (int i=0;i<5;i++){
+        buffer[i]+=order[i];
+    }
+}
+
+//update buffer from a pickup order
+void pick_update(vector<int>& order){
+    for (int i=0;i<5;i++){
+        buffer[i]-=order[i];
+    }
+}
+
+
+void ProductWorker(int id,ofstream &myfile) {
+    vector<int> o1_pick= { 0,0,0,0,0 };
+    vector<int>o3= { 0,0,0,0,0 };
+    vector<int>local_state= { 0,0,0,0,0 };
+    vector<int>o5;
+    vector<int>cart={ 0,0,0,0,0 };
+    for (int i = 0; i < 5; i++)
+    {
+        
+
+        std::unique_lock<std::mutex> lk(m1);
+        
+        int flag= (accumulate(local_state.begin(), local_state.end(), 0)==0) ? 1:0;
+        
+        //Get the new order, based on local state
+        o1_pick =  make_pick_order( local_state);
+       
+        
+        o1_pick =o1_pick-local_state;
+        vector<int>o4=retun_actual_order_for_pick(o1_pick);
+        
+        if (lk.owns_lock()){
+            
+            myfile<<"Current Time: "<<std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::high_resolution_clock::now() - start).count()<<"us"<<endl;;
+            myfile << "Iteration: "<<(i+1)<<endl;
+            myfile<<"Product Work ID: " << id << endl;
+            
+            if(flag==1){
+                myfile<<"Status: New Pickup Order"<<endl;
+            }
+            else{
+                myfile<<"New Pickup Order from Partial Order: "<<local_state<<endl;
+            }
+            
+            myfile<<"Accumuated Wait Time: "<<0<<endl;
+            myfile<<"Buffer State: " << buffer << endl;
+            myfile <<"Pickup Order:" << o1_pick << endl;
+            myfile<<"Local State:"<< local_state<<endl;
+            myfile<<"Cart State:"<< cart<<endl;
+            
+            //Remove parts from buffer
+            pick_update(o4);
+            //Get the remain pick up order
+            o3=o1_pick-o4;
+            //Move parts to the cart
+            cart=cart+o4;
+            
+            myfile<<"Updated Buffer State: " << buffer << endl;
+            myfile<<"Updated Pickup Order:"<<o3<<endl;
+            myfile<<"Local State:"<< local_state<<endl;
+            myfile<<"Cart State:"<< cart<<endl;
+            
+            //If we get all parts
+            if(accumulate(o3.begin(), o3.end(), 0)==0){
+                //move cart to the local state
+                local_state=local_state+cart;
+                //Moving time cost
+                std::this_thread::sleep_for(std::chrono::microseconds(time_cost(cart, 2)));
+                //Assemble parts time cost
+                std::this_thread::sleep_for(std::chrono::microseconds(time_cost(cart, 1)));
+                //Update the total completed products
+                total_completed_products+=1;
+                //Cart and local state clean up
+                cart= { 0,0,0,0,0 };
+                local_state= { 0,0,0,0,0 };
+            }
+
+            o1_pick=o3;
+            
+            myfile<<"Total Completed Products:"<<total_completed_products<<endl;;
+            myfile << endl;
+            cv2.notify_one();
+        }
+        
+        
+        
+        //If we did not complete the current pick-up order
+        if(accumulate(o1_pick.begin(), o1_pick.end(), 0)!=0)
+        {
+            int time=MaxTimeProduct;
+            chrono::system_clock::time_point tbegin;
+            
+            //Check if we still some waiting time left
+            while(time>0)
+            {
+
+                tbegin = chrono::system_clock::now();
+                
+                if(cv2.wait_for(lk, std::chrono::microseconds(time))!=std::cv_status::timeout)
+                {
+                    //If the thread is waked up, check if the current order is processable
+                    if(check_buffer_for_pick(o1_pick))
+                    {
+
+                        int gap=(int)chrono::duration_cast<chrono::microseconds>(chrono::system_clock::now() - tbegin).count();
+
+                        //update waiting time
+                        time-=gap;
+                        
+                        myfile<<"Current Time: "<<std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::high_resolution_clock::now() - start).count()<<"us"<<endl;;
+                        myfile <<"Iteration: "<<(i+1)<<endl;
+                        myfile<<"Product Work ID: " << id << endl;
+                        myfile<<"Status: Wakeup-Notified"<<endl;
+                        myfile<<"Accumuated Wait Time: "<<gap<<endl;
+                        myfile<<"Buffer State: " << buffer << endl;
+                        myfile <<"Pickup Order:" << o1_pick << endl;
+                        myfile<<"Local State:"<< local_state<<endl;
+                        myfile<<"Cart State:"<< cart<<endl;
+                        
+                        vector<int> o2 = retun_actual_order_for_pick(o1_pick);
+                        
+                        //Remove parts from buffer
+                        pick_update(o2);
+                        
+                        //Move parts to the cart
+                        cart=cart+o2;
+                        
+                        //Get the remain pick up order
+                        o3=o1_pick-o2;
+                        
+                        //If we get all parts
+                        if(accumulate(o3.begin(), o3.end(), 0)==0)
+                        {
+                            //move cart to the local state
+                            local_state=local_state+cart;
+                            //Moving time cost
+                            std::this_thread::sleep_for(std::chrono::microseconds(time_cost(cart, 2)));
+                            //Assemble parts time cost
+                            std::this_thread::sleep_for(std::chrono::microseconds(time_cost(cart, 1)));
+                            //Update the total completed products
+                            total_completed_products+=1;
+                            //Cart and local state clean up
+                            cart= { 0,0,0,0,0 };
+                            local_state= { 0,0,0,0,0 };
+                        }
+                        
+                        myfile<<"Updated Buffer State: " << buffer << endl;
+                        myfile<<"Updated Pickup Order:"<<o3<<endl;
+                        myfile<<"Local State:"<< local_state<<endl;
+                        myfile<<"Cart State:"<< cart<<endl;
+                        myfile<<"Total Completed Products:"<<total_completed_products<<endl;;
+                        myfile << endl;
+                        
+                        o1_pick=o3;
+                        cv2.notify_one();
+                       
+                    }
+                }
+                //Time out
+                else
+                {
+                    time-=(int)chrono::duration_cast<chrono::microseconds>(chrono::system_clock::now() - tbegin).count();
+                    
+                    myfile<<"Current Time: "<<std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::high_resolution_clock::now() - start).count()<<"us"<<endl;;
+                    myfile << "Iteration: "<<(i+1)<<endl;
+                    myfile<<"Product Work ID: " << id << endl;
+                    myfile<<"Status: Wakeup-Timeout"<<endl;
+                    myfile<<"Accumuated Wait Time: "<<MaxTimeProduct-time<<endl;
+                    myfile<<"Buffer State: " << buffer << endl;
+                    myfile <<"Pickup Order:" << o1_pick << endl;
+                    myfile<<"Local State:"<< local_state<<endl;
+                    myfile<<"Cart State:"<< cart<<endl;
+                    myfile<<"Updated Buffer State: " << buffer << endl;
+                    myfile<<"Updated Pickup Order:"<<o1_pick<<endl;
+                    
+                    //Move cart to the local state. CLean up the cart.
+                    local_state=local_state+cart;
+                    std::this_thread::sleep_for(std::chrono::microseconds(time_cost(cart, 2)));
+                    cart={0,0,0,0,0};
+                    
+                    myfile<<"Local State:"<< local_state<<endl;
+                    myfile<<"Cart State:"<< cart<<endl;
+                    myfile<<"Total Completed Products:"<<total_completed_products<<endl;
+                    myfile<<endl;
+                    
+                }
+                //If the current order is finished, break and go to the next iteration.
+                if (accumulate(o1_pick.begin(), o1_pick.end(), 0)==0) break;
+            }
+    
+        }
+        
+    }// for loop ends
+
+}
+
+void PartWorker(int id,ofstream &myfile) {
+    
+    
+    
+    vector<int>o1_part; // Current load order
+    vector<int>o3= { 0,0,0,0,0 };// Store the remain order after the current order is processed
+    vector<int>o5= { 0,0,0,0,0 };// store the preivous order from last iteration
+    for (int i = 0; i < 5; i++) {
+        
+        std::unique_lock<std::mutex> lk(m1);
+        
+        //make a new order based on previous remain o3, if o3 is null, make a whole new one
+        o1_part =  make_part_order(o3);
+        
+        //Transfer the remain order(o3) to the o5
+        o5=o3;
+        
+        //Check if there still remains from previous order
+        int flag= (accumulate(o5.begin(), o5.end(), 0)==0) ? 1:0;
+        
+        //Check if the thread owns the lock
+        if (lk.owns_lock()){
+            
+            //retuen the actual order that can be processed
+            vector<int> o4 = retun_actual_order_for_part(o1_part);
+            
+            // get the remain order after processing teh actual order
+            o3=o1_part-o4;
+            
+            myfile<<"Current Time: "<<std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::high_resolution_clock::now() - start).count()<<"us"<<endl;;
+            myfile<< "Iteration: "<<(i+1)<<endl;
+            myfile<<"Part Work ID: " << id << endl;
+            if(flag==1){
+                myfile<<"Status: New Load Order"<<endl;
+            }
+            else{
+                myfile<<"New Load Order from Partial Order: "<<o5<<endl;
+            }
+            
+            //Move parts to the buffer, cost time.
+            std::this_thread::sleep_for(std::chrono::microseconds(time_cost(o1_part, 2)));
+            
+            myfile<<"Accumuated Wait Time: "<<0<<endl;
+            myfile<<"Buffer State: " << buffer << endl;
+            myfile<<"Part Order:" << o1_part << endl;
+            part_update(o4);
+            myfile<<"Updated Buffer State: " << buffer << endl;
+            myfile<<"Updated Part Order:"<<o3<<endl;
+            myfile<<endl;
+            
+            //Make parts, cost time. This is based on the if the previous order is empty or not.
+            vector<int> tmp=o1_part-o5;
+            
+            //Move the remain order to the o1_part
+            o1_part=o3;
+            
+            //Time cost for making parts
+            std::this_thread::sleep_for(std::chrono::microseconds(time_cost(tmp, 0)));
+            
+            //Wake up product worker
+            cv1.notify_one();
+        }
+    
+        
+        // If the current order still has some parts left
+        if(accumulate(o1_part.begin(), o1_part.end(), 0)!=0)
+        {
+        
+            int time=MaxTimePart;
+            chrono::system_clock::time_point tbegin;
+            
+            //Check if there is still waiting time left
+            while(time>0)
+            {
+               
+                tbegin = chrono::system_clock::now();
+                
+                if(cv2.wait_for(lk, std::chrono::microseconds(time))!=std::cv_status::timeout)
+                {
+                    //If the thread is waked up, check if the current order is processable
+                    if(check_buffer_for_part(o1_part))
+                    {
+                        int gap=(int)chrono::duration_cast<chrono::microseconds>(chrono::system_clock::now() - tbegin).count();
+                        
+                        //update waiting time
+                        time-=gap;
+                        
+                        myfile<<"Current Time: "<<std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::high_resolution_clock::now() - start).count()<<"us"<<endl;;
+                        myfile << "Iteration: "<<(i+1)<<endl;
+                        myfile<<"Part Work ID: " << id << endl;
+                        myfile<<"Status: Wakeup-Notified"<<endl;
+                        myfile<<"Accumuated Wait Time: "<<gap<<endl;
+                        myfile<<"Buffer State: " << buffer << endl;
+                        myfile <<"Part Order:" << o1_part << endl;
+                        
+                        vector<int> o2 = retun_actual_order_for_part(o1_part);
+                        o3=o1_part-o2;
+                        part_update(o2);
+                        
+                        myfile<<"Updated Buffer State: " << buffer << endl;
+                        myfile<<"Updated Part Order:"<<o3<<endl;
+                        myfile << endl;
+                        o1_part=o3;
+                        cv1.notify_one();
+                    }
+                }
+                //Time out
+                else
+                {
+                    time-=(int)chrono::duration_cast<chrono::microseconds>(chrono::system_clock::now() - tbegin).count();
+                    
+                    myfile<<"Current Time: "<<std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::high_resolution_clock::now() - start).count()<<"us"<<endl;;
+                    myfile << "Iteration: "<<(i+1)<<endl;
+                    myfile<<"Part Work ID: " << id << endl;
+                    myfile<<"Status: Wakeup-Timeout"<<endl;
+                    myfile<<"Accumuated Wait Time: "<<MaxTimePart-time<<endl;
+                    myfile<<"Buffer State: " << buffer << endl;
+                    myfile <<"Part Order:" << o1_part << endl;
+                    myfile<<"Updated Buffer State: " << buffer << endl;
+                    myfile<<"Updated Part Order:"<<o1_part<<endl;
+                    myfile << endl;
+                    std::this_thread::sleep_for(std::chrono::microseconds(time_cost(o1_part, 3)));
+                    
+                    
+                }
+                 
+                //If the current order is finished, break and go to the next iteration.
+                if (accumulate(o1_part.begin(), o1_part.end(), 0)==0) break;
+                
+            }
+                
+         }
+    }
+
+}
+
+
+int main()
+{
+    
+    ofstream myfile("log.txt");
+    start = chrono::high_resolution_clock::now();
+    const int m = 20, n = 16;
+    //m: number of Part Workers
+    //n: number of Product Workers
+    //m>n
+
+    thread partW[m];
+    thread prodW[n];
+    for (int i = 0; i < n; i++) {
+        partW[i] = thread(PartWorker, i + 1,ref(myfile));
+        prodW[i] = thread(ProductWorker, i + 1,ref(myfile));
+    }
+    for (int i = n; i < m; i++) {
+        partW[i] = thread(PartWorker, i + 1,ref(myfile));
+    }
+
+    /* Join the threads to the main threads */
+    for (int i = 0; i < n; i++) {
+        partW[i].join();
+        prodW[i].join();
+    }
+    for (int i = n; i < m; i++) {
+        partW[i].join();
+    }
+
+
+
+    myfile << "Finish!" << endl;
+    myfile.close();
+    return 0;
+}
